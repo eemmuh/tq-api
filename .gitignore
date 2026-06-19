@@ -1,0 +1,21 @@
+# Binaries
+/api
+/server
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
