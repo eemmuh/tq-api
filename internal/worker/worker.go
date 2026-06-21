@@ -7,15 +7,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/keepcode/api/internal/job"
 )
 
 type Pool struct {
-	store   *job.Store
-	queue   chan string
-	workers int
+	store      *job.Store
+	queue      chan string
+	workers    int
+	httpClient *http.Client
 }
 
 func NewPool(store *job.Store, workers int, queueSize int) *Pool {
@@ -29,6 +31,9 @@ func NewPool(store *job.Store, workers int, queueSize int) *Pool {
 		store:   store,
 		queue:   make(chan string, queueSize),
 		workers: workers,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
 	}
 }
 
@@ -67,7 +72,7 @@ func (p *Pool) process(ctx context.Context, workerID int, id string) {
 
 	log.Printf("worker %d: processing job %s type=%s", workerID, j.ID, j.Type)
 
-	result, err := execute(ctx, j)
+	result, err := execute(ctx, p.httpClient, j)
 	if err != nil {
 		if markErr := p.store.MarkFailed(id, err.Error()); markErr != nil {
 			log.Printf("worker %d: mark failed for %s: %v", workerID, id, markErr)
@@ -83,14 +88,16 @@ func (p *Pool) process(ctx context.Context, workerID int, id string) {
 	log.Printf("worker %d: job %s completed", workerID, id)
 }
 
-func execute(ctx context.Context, j *job.Job) (any, error) {
+func execute(ctx context.Context, client *http.Client, j *job.Job) (any, error) {
 	switch j.Type {
 	case "sleep":
 		return runSleep(ctx, j.Payload)
 	case "hash":
 		return runHash(j.Payload)
+	case "fetch":
+		return runFetch(ctx, client, j.Payload)
 	default:
-		return nil, fmt.Errorf("unknown job type %q (supported: sleep, hash)", j.Type)
+		return nil, fmt.Errorf("unknown job type %q (supported: sleep, hash, fetch)", j.Type)
 	}
 }
 
