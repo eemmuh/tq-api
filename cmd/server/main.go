@@ -18,14 +18,31 @@ import (
 func main() {
 	addr := flag.String("addr", ":8080", "HTTP listen address")
 	workers := flag.Int("workers", 2, "number of background workers")
+	dbPath := flag.String("db", "jobs.db", "SQLite database path")
 	flag.Parse()
 
-	store := job.NewStore()
+	store, err := job.OpenStore(*dbPath)
+	if err != nil {
+		log.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
 	pool := worker.NewPool(store, *workers, *workers*8)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	pool.Run(ctx)
+
+	pending, err := store.RestartPending(ctx)
+	if err != nil {
+		log.Fatalf("restart pending jobs: %v", err)
+	}
+	for _, id := range pending {
+		pool.Enqueue(id)
+	}
+	if len(pending) > 0 {
+		log.Printf("re-enqueued %d pending job(s) from database", len(pending))
+	}
 
 	h := api.NewHandler(store, pool)
 	mux := http.NewServeMux()
