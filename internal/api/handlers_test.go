@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,8 +14,19 @@ import (
 	"github.com/keepcode/api/internal/worker"
 )
 
+func openTestStore(t *testing.T) *job.Store {
+	t.Helper()
+
+	store, err := job.OpenStore(filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatalf("OpenStore() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
 func TestCreateAndGetJob(t *testing.T) {
-	store := job.NewStore()
+	store := openTestStore(t)
 	pool := worker.NewPool(store, 1, 4)
 	pool.Run(t.Context())
 
@@ -70,7 +82,7 @@ func TestCreateAndGetFetchJob(t *testing.T) {
 	}))
 	defer target.Close()
 
-	store := job.NewStore()
+	store := openTestStore(t)
 	pool := worker.NewPool(store, 1, 4)
 	pool.Run(t.Context())
 
@@ -120,7 +132,7 @@ func TestCreateAndGetFetchJob(t *testing.T) {
 }
 
 func TestGetJobNotFound(t *testing.T) {
-	store := job.NewStore()
+	store := openTestStore(t)
 	pool := worker.NewPool(store, 1, 1)
 	h := NewHandler(store, pool)
 

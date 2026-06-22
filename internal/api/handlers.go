@@ -41,7 +41,11 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 		req.Payload = map[string]any{}
 	}
 
-	j := h.store.Create(req.Type, req.Payload)
+	j, err := h.store.Create(req.Type, req.Payload)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create job")
+		return
+	}
 	h.pool.Enqueue(j.ID)
 
 	writeJSON(w, http.StatusAccepted, j)
@@ -62,7 +66,12 @@ func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": h.store.List()})
+	jobs, err := h.store.List()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list jobs")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
