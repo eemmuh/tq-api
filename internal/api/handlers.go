@@ -66,12 +66,23 @@ func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
-	jobs, err := h.store.List()
+	q, err := parseListQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	result, err := h.store.List(q)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list jobs")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"jobs":   result.Jobs,
+		"total":  result.Total,
+		"limit":  result.Limit,
+		"offset": result.Offset,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
