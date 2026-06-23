@@ -147,7 +147,16 @@ Get a single job by ID, including result or error when finished.
 
 ### `GET /jobs`
 
-List all jobs, newest first.
+List jobs, newest first. Results are paginated.
+
+**Query parameters**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `limit` | `50` | Page size (1–100) |
+| `offset` | `0` | Number of jobs to skip |
+| `status` | — | Filter by status: `queued`, `processing`, `completed`, or `failed` |
+| `type` | — | Filter by job type: `sleep`, `hash`, or `fetch` |
 
 **Response `200 OK`**
 
@@ -164,9 +173,21 @@ List all jobs, newest first.
       "started_at": "...",
       "finished_at": "..."
     }
-  ]
+  ],
+  "total": 42,
+  "limit": 50,
+  "offset": 0
 }
 ```
+
+`total` is the number of matching jobs across all pages (after filters, before pagination).
+
+**Errors**
+
+| Status | When |
+|--------|------|
+| `400` | Invalid `limit`, `offset`, or `status` |
+| `500` | Failed to list jobs |
 
 ## Job status lifecycle
 
@@ -281,10 +302,16 @@ Poll job status (replace `{id}` with the job ID from the create response):
 curl -s http://localhost:8080/jobs/{id}
 ```
 
-List all jobs:
+List jobs (first page, default limit 50):
 
 ```bash
 curl -s http://localhost:8080/jobs
+```
+
+List completed fetch jobs with pagination:
+
+```bash
+curl -s 'http://localhost:8080/jobs?status=completed&type=fetch&limit=10&offset=0'
 ```
 
 Submit and poll until complete:
