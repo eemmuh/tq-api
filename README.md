@@ -34,9 +34,35 @@ Example:
 go run ./cmd/server -addr :3000 -workers 4 -db /tmp/jobs.db
 ```
 
-On startup, any jobs left in `processing` state are reset to `queued` and re-enqueued. Queued jobs from a previous run are also picked up automatically.
+On startup, any jobs left in `processing` state are reset to `queued` and re-enqueued. Queued jobs from a previous run are also picked up automatically. Jobs waiting for a retry backoff are re-scheduled as their `next_retry_at` time arrives.
 
-## API
+## Retries
+
+Transient failures are retried automatically with exponential backoff:
+
+- **Max attempts:** 3 per job (configurable in code via `job.DefaultMaxAttempts`)
+- **Backoff:** 1s, 2s, 4s, … capped at 30s
+- **Retryable errors:** network failures on `fetch` jobs (connection errors, timeouts, read failures)
+- **Permanent errors:** validation failures (bad payload, unknown job type) are not retried
+
+While waiting to retry, a job stays `queued` with `next_retry_at` set and the last error in `error`. Poll `GET /jobs/{id}` to see `attempts`, `max_attempts`, and `next_retry_at`.
+
+Example job mid-retry:
+
+```json
+{
+  "id": "...",
+  "type": "fetch",
+  "payload": {"url": "https://example.com"},
+  "status": "queued",
+  "error": "fetch request failed: connection refused",
+  "attempts": 1,
+  "max_attempts": 3,
+  "next_retry_at": "2026-06-22T12:00:01.123456789Z",
+  "created_at": "2026-06-22T12:00:00.123456789Z"
+}
+```
+
 
 All JSON request and response bodies use `Content-Type: application/json`.
 
@@ -77,6 +103,8 @@ Returns the created job. Initial `status` is always `queued`.
   "type": "hash",
   "payload": {"text": "hello"},
   "status": "queued",
+  "attempts": 0,
+  "max_attempts": 3,
   "created_at": "2026-06-22T12:00:00.123456789Z"
 }
 ```
@@ -144,12 +172,12 @@ List all jobs, newest first.
 
 | Status | Meaning |
 |--------|---------|
-| `queued` | Accepted and waiting for a worker |
+| `queued` | Accepted and waiting for a worker (including backoff before a retry) |
 | `processing` | Currently running |
 | `completed` | Finished successfully; see `result` |
-| `failed` | Finished with an error; see `error` |
+| `failed` | Exhausted retries or hit a permanent error; see `error` |
 
-Poll `GET /jobs/{id}` until `status` is `completed` or `failed`.
+Poll `GET /jobs/{id}` until `status` is `completed` or `failed`. A job may return to `queued` between attempts while waiting for retry backoff.
 
 ## Job types
 
