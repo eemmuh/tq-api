@@ -338,6 +338,8 @@ Run tests:
 go test ./...
 ```
 
+CI runs `go test ./...` on every push and pull request to `main` via GitHub Actions (`.github/workflows/ci.yml`).
+
 Build a binary:
 
 ```bash
