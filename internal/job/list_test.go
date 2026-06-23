@@ -70,3 +70,18 @@ func TestValidateListQuery(t *testing.T) {
 		t.Fatal("expected error for invalid status")
 	}
 }
+
+func TestStoreListEmptyResult(t *testing.T) {
+	store := openTestStore(t)
+
+	result, err := store.List(ListQuery{Limit: 10, Type: "fetch"})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if result.Jobs == nil {
+		t.Fatal("Jobs = nil, want empty slice")
+	}
+	if len(result.Jobs) != 0 || result.Total != 0 {
+		t.Fatalf("result = %+v, want empty page", result)
+	}
+}

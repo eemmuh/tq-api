@@ -139,6 +139,9 @@ func (s *Store) List(q ListQuery) (*ListResult, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if out == nil {
+		out = []*Job{}
+	}
 
 	return &ListResult{
 		Jobs:   out,
