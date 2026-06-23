@@ -38,15 +38,18 @@ func TestStoreCreateGetAndList(t *testing.T) {
 		t.Fatalf("MarkCompleted() error = %v", err)
 	}
 
-	jobs, err := store.List()
+	result, err := store.List(ListQuery{Limit: DefaultListLimit})
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	if len(jobs) != 1 {
-		t.Fatalf("List() len = %d, want 1", len(jobs))
+	if len(result.Jobs) != 1 {
+		t.Fatalf("List() len = %d, want 1", len(result.Jobs))
 	}
-	if jobs[0].Status != StatusCompleted {
-		t.Fatalf("List()[0].Status = %q, want completed", jobs[0].Status)
+	if result.Jobs[0].Status != StatusCompleted {
+		t.Fatalf("List()[0].Status = %q, want completed", result.Jobs[0].Status)
+	}
+	if result.Total != 1 {
+		t.Fatalf("List() total = %d, want 1", result.Total)
 	}
 }
 

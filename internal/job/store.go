@@ -98,9 +98,30 @@ func (s *Store) Get(id string) (*Job, error) {
 	return j, nil
 }
 
-func (s *Store) List() ([]*Job, error) {
+func (s *Store) List(q ListQuery) (*ListResult, error) {
+	where := []string{"1=1"}
+	args := make([]any, 0, 2)
+
+	if q.Status != "" {
+		where = append(where, "status = ?")
+		args = append(args, q.Status)
+	}
+	if q.Type != "" {
+		where = append(where, "type = ?")
+		args = append(args, q.Type)
+	}
+
+	whereClause := strings.Join(where, " AND ")
+
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE `+whereClause, args...).Scan(&total); err != nil {
+		return nil, fmt.Errorf("count jobs: %w", err)
+	}
+
+	listArgs := append(append([]any{}, args...), q.Limit, q.Offset)
 	rows, err := s.db.Query(
-		`SELECT ` + jobColumns + ` FROM jobs ORDER BY created_at DESC`,
+		`SELECT `+jobColumns+` FROM jobs WHERE `+whereClause+` ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		listArgs...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
@@ -115,7 +136,16 @@ func (s *Store) List() ([]*Job, error) {
 		}
 		out = append(out, j)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return &ListResult{
+		Jobs:   out,
+		Total:  total,
+		Limit:  q.Limit,
+		Offset: q.Offset,
+	}, nil
 }
 
 func (s *Store) MarkProcessing(id string) error {
