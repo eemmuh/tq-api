@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -30,6 +31,12 @@ func OpenStore(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
+	for _, stmt := range migrations {
+		if _, err := db.Exec(stmt); err != nil && !isDuplicateColumn(err) {
+			_ = db.Close()
+			return nil, fmt.Errorf("migrate schema: %w", err)
+		}
 	}
 	if _, err := db.Exec(`PRAGMA journal_mode=WAL;`); err != nil {
 		_ = db.Close()
@@ -55,16 +62,18 @@ func (s *Store) Create(jobType string, payload map[string]any) (*Job, error) {
 
 	now := time.Now().UTC()
 	j := &Job{
-		ID:        newID(),
-		Type:      jobType,
-		Payload:   payload,
-		Status:    StatusQueued,
-		CreatedAt: now,
+		ID:          newID(),
+		Type:        jobType,
+		Payload:     payload,
+		Status:      StatusQueued,
+		Attempts:    0,
+		MaxAttempts: DefaultMaxAttempts,
+		CreatedAt:   now,
 	}
 
 	_, err = s.db.Exec(
-		`INSERT INTO jobs (id, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?)`,
-		j.ID, j.Type, string(payloadJSON), string(j.Status), formatTime(j.CreatedAt),
+		`INSERT INTO jobs (id, type, payload, status, attempts, max_attempts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		j.ID, j.Type, string(payloadJSON), string(j.Status), j.Attempts, j.MaxAttempts, formatTime(j.CreatedAt),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert job: %w", err)
@@ -73,10 +82,11 @@ func (s *Store) Create(jobType string, payload map[string]any) (*Job, error) {
 	return clone(j), nil
 }
 
+const jobColumns = `id, type, payload, status, result, error, attempts, max_attempts, next_retry_at, created_at, started_at, finished_at`
+
 func (s *Store) Get(id string) (*Job, error) {
 	row := s.db.QueryRow(
-		`SELECT id, type, payload, status, result, error, created_at, started_at, finished_at
-		 FROM jobs WHERE id = ?`, id,
+		`SELECT `+jobColumns+` FROM jobs WHERE id = ?`, id,
 	)
 	j, err := scanJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -90,8 +100,7 @@ func (s *Store) Get(id string) (*Job, error) {
 
 func (s *Store) List() ([]*Job, error) {
 	rows, err := s.db.Query(
-		`SELECT id, type, payload, status, result, error, created_at, started_at, finished_at
-		 FROM jobs ORDER BY created_at DESC`,
+		`SELECT ` + jobColumns + ` FROM jobs ORDER BY created_at DESC`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
@@ -112,8 +121,10 @@ func (s *Store) List() ([]*Job, error) {
 func (s *Store) MarkProcessing(id string) error {
 	now := time.Now().UTC()
 	res, err := s.db.Exec(
-		`UPDATE jobs SET status = ?, started_at = ? WHERE id = ?`,
-		string(StatusProcessing), formatTime(now), id,
+		`UPDATE jobs SET status = ?, started_at = ?
+		 WHERE id = ? AND status = ?
+		 AND (next_retry_at IS NULL OR next_retry_at <= ?)`,
+		string(StatusProcessing), formatTime(now), id, string(StatusQueued), formatTime(now),
 	)
 	if err != nil {
 		return fmt.Errorf("mark processing: %w", err)
@@ -129,7 +140,7 @@ func (s *Store) MarkCompleted(id string, result any) error {
 
 	now := time.Now().UTC()
 	res, err := s.db.Exec(
-		`UPDATE jobs SET status = ?, result = ?, finished_at = ? WHERE id = ?`,
+		`UPDATE jobs SET status = ?, result = ?, error = NULL, next_retry_at = NULL, finished_at = ? WHERE id = ?`,
 		string(StatusCompleted), string(resultJSON), formatTime(now), id,
 	)
 	if err != nil {
@@ -141,11 +152,23 @@ func (s *Store) MarkCompleted(id string, result any) error {
 func (s *Store) MarkFailed(id string, errMsg string) error {
 	now := time.Now().UTC()
 	res, err := s.db.Exec(
-		`UPDATE jobs SET status = ?, error = ?, finished_at = ? WHERE id = ?`,
+		`UPDATE jobs SET status = ?, error = ?, next_retry_at = NULL, finished_at = ? WHERE id = ?`,
 		string(StatusFailed), errMsg, formatTime(now), id,
 	)
 	if err != nil {
 		return fmt.Errorf("mark failed: %w", err)
+	}
+	return ensureUpdated(res)
+}
+
+func (s *Store) ScheduleRetry(id string, errMsg string, nextRetryAt time.Time) error {
+	res, err := s.db.Exec(
+		`UPDATE jobs SET status = ?, attempts = attempts + 1, error = ?, next_retry_at = ?, started_at = NULL
+		 WHERE id = ? AND status = ?`,
+		string(StatusQueued), errMsg, formatTime(nextRetryAt), id, string(StatusProcessing),
+	)
+	if err != nil {
+		return fmt.Errorf("schedule retry: %w", err)
 	}
 	return ensureUpdated(res)
 }
@@ -159,13 +182,17 @@ func (s *Store) RestartPending(ctx context.Context) ([]string, error) {
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE jobs SET status = ?, started_at = NULL WHERE status = ?`,
+		`UPDATE jobs SET status = ?, started_at = NULL, next_retry_at = NULL WHERE status = ?`,
 		string(StatusQueued), string(StatusProcessing),
 	); err != nil {
 		return nil, fmt.Errorf("reset processing jobs: %w", err)
 	}
 
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM jobs WHERE status = ?`, string(StatusQueued))
+	now := formatTime(time.Now().UTC())
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM jobs WHERE status = ? AND (next_retry_at IS NULL OR next_retry_at <= ?)`,
+		string(StatusQueued), now,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("list queued jobs: %w", err)
 	}
@@ -189,21 +216,53 @@ func (s *Store) RestartPending(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
+func (s *Store) ListDelayedRetries(ctx context.Context) ([]DelayedRetry, error) {
+	now := formatTime(time.Now().UTC())
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, next_retry_at FROM jobs
+		 WHERE status = ? AND next_retry_at IS NOT NULL AND next_retry_at > ?`,
+		string(StatusQueued), now,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list delayed retries: %w", err)
+	}
+	defer rows.Close()
+
+	var out []DelayedRetry
+	for rows.Next() {
+		var (
+			id      string
+			retryAt string
+		)
+		if err := rows.Scan(&id, &retryAt); err != nil {
+			return nil, fmt.Errorf("scan delayed retry: %w", err)
+		}
+		t, err := parseTime(retryAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse next_retry_at: %w", err)
+		}
+		out = append(out, DelayedRetry{ID: id, NextRetryAt: t})
+	}
+	return out, rows.Err()
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }
 
 func scanJob(row rowScanner) (*Job, error) {
 	var (
-		j                      Job
+		j                       Job
 		payloadJSON, resultJSON sql.NullString
-		errorText              sql.NullString
-		createdAt              string
-		startedAt, finishedAt  sql.NullString
+		errorText               sql.NullString
+		nextRetryAt             sql.NullString
+		createdAt               string
+		startedAt, finishedAt   sql.NullString
 	)
 
 	if err := row.Scan(
 		&j.ID, &j.Type, &payloadJSON, &j.Status, &resultJSON, &errorText,
+		&j.Attempts, &j.MaxAttempts, &nextRetryAt,
 		&createdAt, &startedAt, &finishedAt,
 	); err != nil {
 		return nil, err
@@ -230,6 +289,13 @@ func scanJob(row rowScanner) (*Job, error) {
 	}
 	if errorText.Valid {
 		j.Error = errorText.String
+	}
+	if nextRetryAt.Valid {
+		t, err := parseTime(nextRetryAt.String)
+		if err != nil {
+			return nil, fmt.Errorf("parse next_retry_at: %w", err)
+		}
+		j.NextRetryAt = &t
 	}
 
 	if payloadJSON.Valid && payloadJSON.String != "" {
@@ -280,4 +346,8 @@ func clone(j *Job) *Job {
 		}
 	}
 	return &cp
+}
+
+func isDuplicateColumn(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "duplicate column")
 }
