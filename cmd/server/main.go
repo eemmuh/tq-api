@@ -44,6 +44,15 @@ func main() {
 		log.Printf("re-enqueued %d pending job(s) from database", len(pending))
 	}
 
+	delayed, err := store.ListDelayedRetries(ctx)
+	if err != nil {
+		log.Fatalf("list delayed retries: %v", err)
+	}
+	pool.ScheduleDelayedRetries(delayed)
+	if len(delayed) > 0 {
+		log.Printf("scheduled %d delayed retry job(s)", len(delayed))
+	}
+
 	h := api.NewHandler(store, pool)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", h.Health)

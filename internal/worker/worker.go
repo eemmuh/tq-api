@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -18,9 +19,15 @@ type Pool struct {
 	queue      chan string
 	workers    int
 	httpClient *http.Client
+	retry      RetryConfig
+	ctx        context.Context
 }
 
 func NewPool(store *job.Store, workers int, queueSize int) *Pool {
+	return NewPoolWithRetry(store, workers, queueSize, DefaultRetryConfig())
+}
+
+func NewPoolWithRetry(store *job.Store, workers int, queueSize int, retry RetryConfig) *Pool {
 	if workers < 1 {
 		workers = 1
 	}
@@ -31,6 +38,7 @@ func NewPool(store *job.Store, workers int, queueSize int) *Pool {
 		store:   store,
 		queue:   make(chan string, queueSize),
 		workers: workers,
+		retry:   retry,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -42,9 +50,34 @@ func (p *Pool) Enqueue(id string) {
 }
 
 func (p *Pool) Run(ctx context.Context) {
+	p.ctx = ctx
 	for i := 0; i < p.workers; i++ {
 		go p.loop(ctx, i)
 	}
+}
+
+func (p *Pool) ScheduleDelayedRetries(delayed []job.DelayedRetry) {
+	for _, item := range delayed {
+		p.scheduleRetryEnqueue(item.ID, item.NextRetryAt)
+	}
+}
+
+func (p *Pool) scheduleRetryEnqueue(id string, retryAt time.Time) {
+	delay := time.Until(retryAt)
+	if delay < 0 {
+		delay = 0
+	}
+	time.AfterFunc(delay, func() {
+		if p.ctx == nil {
+			return
+		}
+		select {
+		case <-p.ctx.Done():
+			return
+		default:
+			p.Enqueue(id)
+		}
+	})
 }
 
 func (p *Pool) loop(ctx context.Context, workerID int) {
@@ -60,7 +93,9 @@ func (p *Pool) loop(ctx context.Context, workerID int) {
 
 func (p *Pool) process(ctx context.Context, workerID int, id string) {
 	if err := p.store.MarkProcessing(id); err != nil {
-		log.Printf("worker %d: job %s missing: %v", workerID, id, err)
+		if !errors.Is(err, job.ErrNotFound) {
+			log.Printf("worker %d: job %s not ready: %v", workerID, id, err)
+		}
 		return
 	}
 
@@ -70,14 +105,11 @@ func (p *Pool) process(ctx context.Context, workerID int, id string) {
 		return
 	}
 
-	log.Printf("worker %d: processing job %s type=%s", workerID, j.ID, j.Type)
+	log.Printf("worker %d: processing job %s type=%s attempt=%d/%d", workerID, j.ID, j.Type, j.Attempts+1, j.MaxAttempts)
 
 	result, err := execute(ctx, p.httpClient, j)
 	if err != nil {
-		if markErr := p.store.MarkFailed(id, err.Error()); markErr != nil {
-			log.Printf("worker %d: mark failed for %s: %v", workerID, id, markErr)
-		}
-		log.Printf("worker %d: job %s failed: %v", workerID, id, err)
+		p.handleFailure(workerID, j, err)
 		return
 	}
 
@@ -86,6 +118,26 @@ func (p *Pool) process(ctx context.Context, workerID int, id string) {
 		return
 	}
 	log.Printf("worker %d: job %s completed", workerID, id)
+}
+
+func (p *Pool) handleFailure(workerID int, j *job.Job, err error) {
+	if isRetryable(err) && j.Attempts+1 < j.MaxAttempts {
+		delay := retryDelay(p.retry, j.Attempts+1)
+		retryAt := time.Now().UTC().Add(delay)
+		if schedErr := p.store.ScheduleRetry(j.ID, err.Error(), retryAt); schedErr != nil {
+			log.Printf("worker %d: schedule retry for %s: %v", workerID, j.ID, schedErr)
+			return
+		}
+		log.Printf("worker %d: job %s failed (retry %d/%d in %s): %v",
+			workerID, j.ID, j.Attempts+1, j.MaxAttempts-1, delay, err)
+		p.scheduleRetryEnqueue(j.ID, retryAt)
+		return
+	}
+
+	if markErr := p.store.MarkFailed(j.ID, err.Error()); markErr != nil {
+		log.Printf("worker %d: mark failed for %s: %v", workerID, j.ID, markErr)
+	}
+	log.Printf("worker %d: job %s failed: %v", workerID, j.ID, err)
 }
 
 func execute(ctx context.Context, client *http.Client, j *job.Job) (any, error) {
